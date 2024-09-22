@@ -1,7 +1,10 @@
-﻿cls
-Write-Host @"
+﻿Write-Host @"
 ##自動批次整理翻譯Ver1    by RueiKato
 
+    -2024.9.22 -依需求做修正
+                    -顯示檔名路徑調整
+                    -除錯(位置對應錯誤的問題)
+                    -建置翻譯功能
     -2024.9.21 -依照大喵需求建置自動化程式
 
 ##第一次使用請按 YES 授權給程式做系統級別操作
@@ -12,12 +15,13 @@ Set-ExecutionPolicy unrestricted -Scope Process
 #檢查安裝ImportExcel
 if (-not (Get-module -ListAvailable -Name ImportExcel -ErrorAction SilentlyContinue)){
     Install-Module -Name ImportExcel -Scope CurrentUser
-    Write-Host "ImportExcel has installed"
+    Import-Module -Name ImportExcel
+    Write-Host "ImportExcel has been installed and loaded."
 } else {
     Write-Host "ImportExcel has been installed already."
 }
 
-#創建GUI讓user選擇需要處理的、excel檔案所在資料夾
+#創建GUI讓user選擇需要處理的excel檔案所在資料夾
 Add-Type -AssemblyName System.Windows.Forms
 
 $folderBrowserDialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -32,60 +36,134 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK){
     $OutputPath = Join-Path $PSScriptRoot "result.xlsx"
 
     #Get all the excel files from select folder
-    $ExcelFiles = gci -Path $selectFolder -Filter "*.xlsx"
+    $ExcelFiles = Get-ChildItem -Path $selectFolder -Filter "*.xlsx"
 
     #init data shell
     $ProcessedData = @()
     $UnprocessedData = @()
 
+    function translatems($Text, $FromLang, $ToLang){
+        $subscriptionKey = 'YourKey'  
+        $endpoint = 'https://api.cognitive.microsofttranslator.com/'
+        $location = 'eastasia'
+
+        $path = '/translate?api-version=3.0'
+        $params = "&from=$FromLang&to=$ToLang"
+
+        $uri = $endpoint.TrimEnd('/') + $path + $params
+
+        $body = @(
+            @{
+                'Text' = $Text
+            }
+        )
+
+        $headers = @{
+            'Ocp-Apim-Subscription-Key' = $subscriptionKey
+            'Ocp-Apim-Subscription-Region' = $location
+            'Content-Type' = 'application/json'
+        }
+
+        function ConvertTo-JsonForceArray($InputObject, $Depth) {
+            $json = $InputObject | ConvertTo-Json -Depth $Depth
+            if ($InputObject.Count -eq 1 -and $json.StartsWith('{')) {
+                return "[$json]"
+            } else {
+                return $json
+            }
+        }
+
+
+
+        try {
+            $bodyJson = ConvertTo-JsonForceArray -InputObject $body -Depth 2
+            # Write-Host "翻譯請求的 URI: $uri"
+            Write-Host "翻譯文字: $bodyJson"
+            
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $bodyJson
+
+            if ($response -and $response[0].translations) {
+                return $response[0].translations[0].text
+            } else {
+                Write-Host "翻譯回應為空或格式錯誤"
+                return ""
+            }
+        }
+        catch {
+            Write-Host "翻譯 API 呼叫失敗: $($_.Exception.Message)"
+            if ($_.Exception.Response) {
+                $errorResponse = $_.Exception.Response.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($errorResponse)
+                $errorContent = $reader.ReadToEnd()
+                Write-Host "錯誤內容: $errorContent"
+            }
+            return ""
+        }
+    }
+
     #處理每個excel文件
     foreach ($File in $ExcelFiles){
-        $FileName = $File.FullName
+        $FileName = Split-Path -Path $File.Fullname -Leaf
 
-        $ExcelPackage = Open-ExcelPackage -Path $FileName
+        $ExcelPackage = Open-ExcelPackage -Path $File.Fullname
         $SheetNames = $ExcelPackage.Workbook.Worksheets | Select-Object -ExpandProperty Name
 
         foreach ($SheetName in $SheetNames){
             $Worksheet = $ExcelPackage.Workbook.Worksheets[$SheetName]
 
-            if ($Worksheet -eq $null){
+            if ($null -eq $Worksheet){
                 continue
             }
 
             $A3 = $Worksheet.Cells["A3"].Text.Trim()
             $A9 = $Worksheet.Cells["A9"].Text.Trim()
 
-            Write-Host "Processing File: $FileName, Sheet: $SheetName"
+            Write-Host ""
+            Write-Host "處理的檔案名稱:$FileName`n處理的頁籤: $SheetName"
+            Write-Host ""
+            Write-Host "判斷資料來源"
             Write-Host "A3: '$A3'"
             Write-Host "A9: '$A9'"
+            Write-Host ""
 
             if ($A3 -match "公司別[:：]" -and $A9 -match "單位名稱"){
                 $CompanyName = $A3
 
-                $TotalRow = $null
+                #最後一筆有效資料的row
+                $EndRow = $null
+               
                 for ($row = 10; $row -le $Worksheet.Dimension.End.Row; $row++){
                     $cellValue = $Worksheet.Cells["A$row"].Text
-                    if ($cellValue -match ".*總\s+計.*"){
-                        $TotalRow = $row
+                
+                    if ([string]::IsNullOrWhiteSpace($cellValue)){
+                        $EndRow = $row - 1
                         break
+                    } else {
+                        $EndRow = $row
                     }
                 }
-                if ($TotalRow -ne $null){
-                    $StartRow = 10
-                    $EndRow = $TotalRow -1
-                } else {
-                    #如果沒有"總　　　　計", 則處理到最後一筆資料(這邊覺得會有問題, 先這樣寫)
-                    $StartRow = 10
+
+                if ($null -eq $EndRow){
                     $EndRow = $Worksheet.Dimension.End.Row
                 }
 
-                #抓數據, and past them to the new sheet[0] in new file
+                #檢查遇到"總    計"的問題
+                $CellValuePreviousRow = $Worksheet.Cells["A$EndRow"].Text.Trim()
+                if ($CellValuePreviousRow -match '^總\s+計$'){
+                    $EndRow = $EndRow -1
+                    if ($EndRow -lt 10){
+                        $EndRow = 10
+                    }
+                }
+
+                #抓數據, and paste them to the new sheet[0] in new file
+                $StartRow = 10     #從row10開始處理
                 for ($row = $StartRow; $row -le $EndRow; $row++){
                     $UnitName = $Worksheet.Cells["A$row"].Text
-                    $UnitNameEng = $Worksheet.Cells["B$row"].Text
-                    $InsuranceLocation = $Worksheet.Cells["C$row"].Text
-                    $InsuranceLocationEng = $Worksheet.Cells["D$row"].Text
-                    $PropertyAmount = $Worksheet.Cells["E$row"].Text
+                    $UnitNameEng = translatems -Text $UnitName -FromLang 'zh-Hant' -ToLang 'en'
+                    $InsuranceLocation = $Worksheet.Cells["B$row"].Text
+                    $InsuranceLocationEng = translatems -Text $InsuranceLocation -FromLang 'zh-Hant' -ToLang 'en'
+                    $PropertyAmount = $Worksheet.Cells["C$row"].Text
 
                     $DataEntry = [PSCustomObject]@{
                         "檔案名稱" = $FileName
