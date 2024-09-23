@@ -42,10 +42,19 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK){
     $ProcessedData = @()
     $UnprocessedData = @()
 
+    #設置config 文件取得api and location value (自行設置自己的value)
+    #翻譯是使用MS translator API, 可以在Azure上註冊帳號後選擇免費方案有限度的使用
+    $configFile = ".\config.json"
+
+    $config = Get-Content $configFile | ConvertFrom-Json
+
+    $YOUR_API_KEY = $config.YOUR_API_KEY
+    $YOUR_LOCATION = $config.YOUR_LOCATION
+
     function translatems($Text, $FromLang, $ToLang){
-        $subscriptionKey = 'YourKey'  
+        $subscriptionKey = $YOUR_API_KEY  
         $endpoint = 'https://api.cognitive.microsofttranslator.com/'
-        $location = 'eastasia'
+        $location = $YOUR_LOCATION
 
         $path = '/translate?api-version=3.0'
         $params = "&from=$FromLang&to=$ToLang"
@@ -120,10 +129,6 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK){
 
             Write-Host ""
             Write-Host "處理的檔案名稱:$FileName`n處理的頁籤: $SheetName"
-            Write-Host ""
-            Write-Host "判斷資料來源"
-            Write-Host "A3: '$A3'"
-            Write-Host "A9: '$A9'"
             Write-Host ""
 
             if ($A3 -match "公司別[:：]" -and $A9 -match "單位名稱"){
